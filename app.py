@@ -1034,7 +1034,7 @@ elif (
         # SUSPICIOUS REGIONS
         # ----------------------------------------------------
 
-        if regions:
+        if status == "Potential Anomaly" and regions:
 
             st.subheader(
                 "🟨 Suspicious Sonar Regions"
