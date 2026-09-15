@@ -25,8 +25,7 @@ st.set_page_config(
 # ============================================================
 
 MODEL_PATH = (
-    r"C:\Users\vincy\OneDrive\Desktop\marine_debris_ai"
-    r"\runs\detect\shipwreck_final\weights\best.pt"
+    "best.pt"
 )
 
 CONFIDENCE_THRESHOLD = 0.30
