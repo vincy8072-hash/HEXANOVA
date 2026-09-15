@@ -119,10 +119,8 @@ def run_analysis(uploaded_file):
         filtered
     )
 
-    processed_image = cv2.cvtColor(
-        enhanced,
-        cv2.COLOR_GRAY2RGB
-    )
+    processed_image = image_array
+    
 
 
     # --------------------------------------------------------
