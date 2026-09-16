@@ -129,7 +129,7 @@ def run_analysis(uploaded_file):
 
     results = model(
         processed_image,
-        conf=0.20,
+        conf=0.01,
         iou=0.50,
         max_det=1
     )
