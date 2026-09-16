@@ -28,7 +28,7 @@ MODEL_PATH = (
     "best.pt"
 )
 
-CONFIDENCE_THRESHOLD = 0.30
+CONFIDENCE_THRESHOLD = 0.20
 
 
 # ============================================================
