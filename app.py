@@ -195,6 +195,20 @@ def run_analysis(uploaded_file):
 
 
     # --------------------------------------------------------
+    # ANOMALY VISUALIZATION
+    # --------------------------------------------------------
+
+    anomaly_regions = anomaly_result.get(
+        "anomaly_regions",
+        []
+    )
+
+    anomaly_visual = create_anomaly_visual(
+        processed_image,
+        anomaly_regions
+    )
+
+    # --------------------------------------------------------
     # ANALYSIS RESULT
     # --------------------------------------------------------
 
@@ -214,6 +228,8 @@ def run_analysis(uploaded_file):
 
         "anomaly": anomaly_result,
 
+        "anomaly_visual": anomaly_visual,
+
         "image_name": uploaded_file.name,
 
         "image_type": uploaded_file.type,
@@ -227,13 +243,72 @@ def run_analysis(uploaded_file):
 
 
 # ============================================================
+# ANOMALY VISUALIZATION HELPER
+# ============================================================
+
+def create_anomaly_visual(processed_image, anomaly_regions):
+    """
+    Create an RGB copy of the processed sonar image with
+    suspicious anomaly regions highlighted.
+
+    The highlighted regions are potential anomalies only;
+    they are not confirmed marine debris.
+    """
+    anomaly_visual = processed_image.copy()
+
+    if anomaly_visual is None:
+        return None
+
+    # Make sure we have a writable uint8 RGB image.
+    if anomaly_visual.dtype != np.uint8:
+        anomaly_visual = np.clip(anomaly_visual, 0, 255).astype(np.uint8)
+
+    if len(anomaly_regions) == 0:
+        return anomaly_visual
+
+    for index, region in enumerate(anomaly_regions):
+        x = int(region.get("x", 0))
+        y = int(region.get("y", 0))
+        w = int(region.get("width", 0))
+        h = int(region.get("height", 0))
+
+        # Keep coordinates inside the image.
+        image_height, image_width = anomaly_visual.shape[:2]
+        x = max(0, min(x, image_width - 1))
+        y = max(0, min(y, image_height - 1))
+        x2 = max(x + 1, min(x + w, image_width - 1))
+        y2 = max(y + 1, min(y + h, image_height - 1))
+
+        cv2.rectangle(
+            anomaly_visual,
+            (x, y),
+            (x2, y2),
+            (255, 255, 0),
+            3
+        )
+
+        cv2.putText(
+            anomaly_visual,
+            f"Potential Region {index + 1}",
+            (x, max(20, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),
+            2
+        )
+
+    return anomaly_visual
+
+
+# ============================================================
 # WORD REPORT GENERATOR
 # ============================================================
 
 def create_word_report(
     report_data,
     original_image=None,
-    annotated_image=None
+    annotated_image=None,
+    anomaly_image=None
 ):
 
     doc = Document()
@@ -618,6 +693,44 @@ def create_word_report(
         doc.add_picture(
             annotated_buffer,
             width=Inches(6.2)
+        )
+
+        doc.add_paragraph(
+            "This image shows the regions identified by the "
+            "YOLOv8 known-object detection model."
+        )
+
+    if anomaly_image is not None:
+
+        doc.add_heading(
+            "11. Anomaly Analysis Visualization",
+            level=1
+        )
+
+        anomaly_buffer = BytesIO()
+
+        # anomaly_image is already RGB because it is generated
+        # from the RGB processed sonar image.
+        anomaly_pil = Image.fromarray(
+            anomaly_image
+        )
+
+        anomaly_pil.save(
+            anomaly_buffer,
+            format="PNG"
+        )
+        anomaly_buffer.seek(0)
+
+        doc.add_picture(
+            anomaly_buffer,
+            width=Inches(6.2)
+        )
+
+        doc.add_paragraph(
+            "Yellow boxes indicate localized sonar regions "
+            "flagged by the prototype anomaly-analysis layer. "
+            "These are potential anomalies for human inspection "
+            "and are not confirmed marine debris."
         )
 
     doc.add_paragraph()
@@ -1466,55 +1579,19 @@ elif (
                 "🟨 Suspicious Sonar Regions"
             )
 
-            anomaly_visual = (
-                processed_image.copy()
+            anomaly_visual = data.get(
+                "anomaly_visual"
             )
 
-
-            for index, region in enumerate(
-                regions
-            ):
-
-                x = region["x"]
-
-                y = region["y"]
-
-                w = region["width"]
-
-                h = region["height"]
-
-
-                cv2.rectangle(
+            if anomaly_visual is not None:
+                st.image(
                     anomaly_visual,
-                    (x, y),
-                    (x + w, y + h),
-                    (255, 255, 0),
-                    3
-                )
-
-
-                cv2.putText(
-                    anomaly_visual,
-                    f"Potential Region {index + 1}",
-                    (
-                        x,
-                        max(
-                            20,
-                            y - 8
-                        )
+                    caption=(
+                        "Potential Anomaly Regions — "
+                        "Yellow boxes require human inspection"
                     ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 0),
-                    2
+                    use_container_width=True
                 )
-
-
-            st.image(
-                anomaly_visual,
-                caption="Potential Anomaly Regions",
-                use_container_width=True
-            )
 
         else:
 
@@ -1657,6 +1734,10 @@ elif st.session_state.page == "Reports":
             "anomaly"
         ]
 
+        anomaly_visual = data.get(
+            "anomaly_visual"
+        )
+
         # ----------------------------------------------------
         # REPORT HEADER
         # ----------------------------------------------------
@@ -1704,6 +1785,44 @@ elif st.session_state.page == "Reports":
             caption="Annotated AI Detection Result",
             use_container_width=True
         )
+
+
+        # ----------------------------------------------------
+        # ANOMALY ANALYSIS IMAGE
+        # ----------------------------------------------------
+
+        st.subheader(
+            "⚠️ Anomaly Analysis Image"
+        )
+
+        if anomaly_visual is not None and suspicious_regions if False else False:
+            pass
+
+        suspicious_regions_for_display = anomaly.get(
+            "anomaly_regions",
+            []
+        )
+
+        if suspicious_regions_for_display:
+            st.image(
+                anomaly_visual,
+                caption=(
+                    "Potential Anomaly Regions — "
+                    "Yellow boxes indicate suspicious sonar regions"
+                ),
+                use_container_width=True
+            )
+
+            st.caption(
+                "The highlighted regions are potential anomalies "
+                "identified by the prototype anomaly-analysis layer. "
+                "They are not confirmed marine debris."
+            )
+        else:
+            st.info(
+                "No suspicious sonar regions were identified, "
+                "so no anomaly-region overlay is shown."
+            )
 
 
         st.divider()
@@ -1898,6 +2017,14 @@ elif st.session_state.page == "Reports":
             explanation
         )
 
+        if suspicious_regions:
+            st.info(
+                "⚠️ The anomaly overlay highlights the suspicious "
+                "regions identified by the prototype. These regions "
+                "are flagged for human inspection and are not "
+                "automatically classified as marine debris."
+            )
+
         st.caption(
             "It shows how strongly the image contains "
             "unusual localized sonar patterns that may "
@@ -2020,7 +2147,18 @@ elif st.session_state.page == "Reports":
             },
 
             "suspicious_regions":
-                suspicious_regions
+                suspicious_regions,
+
+            "visualizations": {
+                "ai_detection_image":
+                    "Included in the human-readable Word report and Reports page.",
+                "anomaly_analysis_image":
+                    (
+                        "Included when suspicious anomaly regions are present. "
+                        "Highlighted regions are potential anomalies and require "
+                        "human inspection."
+                    )
+            }
         }
 
 
@@ -2062,7 +2200,8 @@ elif st.session_state.page == "Reports":
         word_report = create_word_report(
             report,
             original_image=image,
-            annotated_image=annotated_image_for_report
+            annotated_image=annotated_image_for_report,
+            anomaly_image=anomaly_visual
         )
 
         st.download_button(
