@@ -6,6 +6,10 @@ import json
 from datetime import datetime
 from ultralytics import YOLO
 from anomaly import analyse_anomaly
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from io import BytesIO
 
 
 # ============================================================
