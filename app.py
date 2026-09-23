@@ -174,6 +174,8 @@ def run_analysis(uploaded_file):
                 class_id
             ]
 
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+
             detection_data.append(
                 {
                     "object": i + 1,
@@ -181,10 +183,30 @@ def run_analysis(uploaded_file):
                     "confidence": round(
                         confidence,
                         4
-                    )
+                    ),
+                    "bbox": {
+                        "x": int(x1),
+                        "y": int(y1),
+                        "width": int(x2 - x1),
+                        "height": int(y2 - y1)
+                    }
                 }
             )
 
+
+    # --------------------------------------------------------
+    # ANOMALY VISUALIZATION
+    # --------------------------------------------------------
+
+    anomaly_regions = anomaly_result.get(
+        "anomaly_regions",
+        []
+    )
+
+    anomaly_visual = create_anomaly_visual(
+        processed_image,
+        anomaly_regions
+    )
 
     # --------------------------------------------------------
     # ANALYSIS RESULT
@@ -206,6 +228,8 @@ def run_analysis(uploaded_file):
 
         "anomaly": anomaly_result,
 
+        "anomaly_visual": anomaly_visual,
+
         "image_name": uploaded_file.name,
 
         "image_type": uploaded_file.type,
@@ -216,6 +240,515 @@ def run_analysis(uploaded_file):
             ),
 
     }
+
+
+# ============================================================
+# ANOMALY VISUALIZATION HELPER
+# ============================================================
+
+def create_anomaly_visual(processed_image, anomaly_regions):
+    """
+    Create an RGB copy of the processed sonar image with
+    suspicious anomaly regions highlighted.
+
+    The highlighted regions are potential anomalies only;
+    they are not confirmed marine debris.
+    """
+    anomaly_visual = processed_image.copy()
+
+    if anomaly_visual is None:
+        return None
+
+    # Make sure we have a writable uint8 RGB image.
+    if anomaly_visual.dtype != np.uint8:
+        anomaly_visual = np.clip(anomaly_visual, 0, 255).astype(np.uint8)
+
+    if len(anomaly_regions) == 0:
+        return anomaly_visual
+
+    for index, region in enumerate(anomaly_regions):
+        x = int(region.get("x", 0))
+        y = int(region.get("y", 0))
+        w = int(region.get("width", 0))
+        h = int(region.get("height", 0))
+
+        # Keep coordinates inside the image.
+        image_height, image_width = anomaly_visual.shape[:2]
+        x = max(0, min(x, image_width - 1))
+        y = max(0, min(y, image_height - 1))
+        x2 = max(x + 1, min(x + w, image_width - 1))
+        y2 = max(y + 1, min(y + h, image_height - 1))
+
+        cv2.rectangle(
+            anomaly_visual,
+            (x, y),
+            (x2, y2),
+            (255, 255, 0),
+            3
+        )
+
+        cv2.putText(
+            anomaly_visual,
+            f"Potential Region {index + 1}",
+            (x, max(20, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),
+            2
+        )
+
+    return anomaly_visual
+
+
+# ============================================================
+# WORD REPORT GENERATOR
+# ============================================================
+
+def create_word_report(
+    report_data,
+    original_image=None,
+    annotated_image=None,
+    anomaly_image=None
+):
+
+    doc = Document()
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    title_run = title.add_run(
+        "HEXANOVA — Side-Scan Sonar Survey Report"
+    )
+    title_run.bold = True
+    title_run.font.size = Pt(20)
+
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    subtitle_run = subtitle.add_run(
+        "AI-Assisted Underwater Marine Debris & "
+        "Anomaly Detection"
+    )
+    subtitle_run.font.size = Pt(11)
+
+    doc.add_paragraph()
+
+    # --------------------------------------------------------
+    # SURVEY INFORMATION
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "1. Survey Information",
+        level=1
+    )
+
+    survey_table = doc.add_table(
+        rows=0,
+        cols=2
+    )
+    survey_table.style = "Table Grid"
+
+    survey_information = [
+        (
+            "System",
+            report_data["system"]
+        ),
+        (
+            "Image",
+            report_data["image_name"]
+        ),
+        (
+            "Image Resolution",
+            (
+                f'{report_data["image_size"]["width"]} × '
+                f'{report_data["image_size"]["height"]} pixels'
+            )
+        ),
+        (
+            "Analysis Time",
+            report_data["analysis_time"]
+        ),
+        (
+            "AI Model",
+            report_data["processing"]["ai_model"]
+        ),
+        (
+            "Known AI Class",
+            report_data["processing"]["known_class"]
+        ),
+        (
+            "Confirmation Threshold",
+            f'{report_data["confidence_threshold"]:.0%}'
+        )
+    ]
+
+    for label, value in survey_information:
+        cells = survey_table.add_row().cells
+        cells[0].text = label
+        cells[1].text = str(value)
+
+    doc.add_paragraph()
+
+    # --------------------------------------------------------
+    # AI DETECTION SUMMARY
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "2. AI Detection Summary",
+        level=1
+    )
+
+    detections = report_data["detected_objects"]
+    threshold = report_data["confidence_threshold"]
+
+    if detections:
+
+        confirmed = [
+            d for d in detections
+            if d["confidence"] >= threshold
+        ]
+
+        low_confidence = [
+            d for d in detections
+            if d["confidence"] < threshold
+        ]
+
+        if confirmed:
+
+            highest = max(
+                confirmed,
+                key=lambda d: d["confidence"]
+            )
+
+            doc.add_paragraph(
+                f'The YOLOv8-based detection model identified '
+                f'{len(confirmed)} confirmed known sonar object(s). '
+                f'The highest confirmed detection confidence was '
+                f'{highest["confidence"]:.1%}. The detection meets '
+                f'the prototype confirmation threshold of '
+                f'{threshold:.0%}.'
+            )
+
+        if low_confidence:
+
+            doc.add_paragraph(
+                f'{len(low_confidence)} low-confidence prediction(s) '
+                f'were also produced. These predictions remained '
+                f'below the {threshold:.0%} confirmation threshold '
+                f'and are not treated as confirmed known objects.'
+            )
+
+        if not confirmed:
+
+            highest = max(
+                detections,
+                key=lambda d: d["confidence"]
+            )
+
+            doc.add_paragraph(
+                f'The model produced a weak similarity to the '
+                f'known "{highest["class"]}" class with a confidence '
+                f'of {highest["confidence"]:.1%}. This is below the '
+                f'{threshold:.0%} confirmation threshold and is '
+                f'therefore not treated as a confirmed detection.'
+            )
+
+    else:
+
+        doc.add_paragraph(
+            "The AI detection model did not identify a known "
+            "trained object in the uploaded sonar image."
+        )
+
+    # --------------------------------------------------------
+    # DETECTION FINDINGS
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "3. Detection Findings",
+        level=1
+    )
+
+    if detections:
+
+        for detection in detections:
+
+            bbox = detection.get(
+                "bbox",
+                {}
+            )
+
+            paragraph = doc.add_paragraph()
+
+            paragraph.add_run(
+                f'Object {detection["object"]}: '
+            ).bold = True
+
+            paragraph.add_run(
+                f'{detection["class"]}'
+            )
+
+            paragraph.add_run(
+                f' — Detection confidence: '
+                f'{detection["confidence"]:.1%}.'
+            )
+
+            if bbox:
+
+                doc.add_paragraph(
+                    f'Image location: x={bbox.get("x", 0)} px, '
+                    f'y={bbox.get("y", 0)} px, '
+                    f'width={bbox.get("width", 0)} px, '
+                    f'height={bbox.get("height", 0)} px.',
+                    style=None
+                )
+
+    else:
+
+        doc.add_paragraph(
+            "No known-object bounding boxes were generated."
+        )
+
+    # --------------------------------------------------------
+    # ANOMALY ANALYSIS
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "4. Anomaly Analysis",
+        level=1
+    )
+
+    anomaly = report_data["anomaly_analysis"]
+
+    doc.add_paragraph(
+        f'Status: {anomaly["status"]}'
+    )
+
+    doc.add_paragraph(
+        f'Prototype anomaly score: '
+        f'{anomaly["score"] * 100:.1f}/100'
+    )
+
+    doc.add_paragraph(
+        f'Suspicious sonar regions: '
+        f'{anomaly["suspicious_region_count"]}'
+    )
+
+    doc.add_paragraph(
+        anomaly["explanation"]
+    )
+
+    doc.add_paragraph(
+        "The anomaly score is a prototype heuristic and is "
+        "not a calibrated probability of marine debris."
+    )
+
+    # --------------------------------------------------------
+    # GEOGRAPHIC INFORMATION
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "5. Geographic Information",
+        level=1
+    )
+
+    doc.add_paragraph(
+        "No geographic coordinates were inferred from the "
+        "sonar image. Latitude and longitude should be obtained "
+        "from sonar/AUV metadata or ping headers when available."
+    )
+
+    # --------------------------------------------------------
+    # FINAL SURVEY INTERPRETATION
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "6. Final Survey Interpretation",
+        level=1
+    )
+
+    status = anomaly["status"]
+
+    if status == "Known Object":
+
+        conclusion = (
+            "The AI detected a sonar pattern matching the "
+            "currently trained Shipwreck class. The result is "
+            "treated as a known-object detection by the prototype."
+        )
+
+    elif status == "Low Confidence Detection":
+
+        conclusion = (
+            "The AI found some similarity to the known trained "
+            "class, but the confidence remained below the "
+            "confirmation threshold. The result requires review."
+        )
+
+    elif status == "Potential Anomaly":
+
+        conclusion = (
+            "No known trained object was confidently detected. "
+            "Localized sonar regions were flagged as potential "
+            "anomalies for further human inspection. These regions "
+            "are not confirmed marine debris."
+        )
+
+    else:
+
+        conclusion = (
+            "No strong known-object or suspicious anomaly pattern "
+            "was identified by the current prototype analysis."
+        )
+
+    doc.add_paragraph(
+        conclusion
+    )
+
+    # --------------------------------------------------------
+    # HUMAN REVIEW NOTE
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "7. Human Review Note",
+        level=1
+    )
+
+    doc.add_paragraph(
+        "This is an AI-assisted screening report. Detection "
+        "results and potential anomaly regions should be "
+        "reviewed by a qualified human operator before being "
+        "used for operational or scientific decisions."
+    )
+
+    # --------------------------------------------------------
+    # SYSTEM INFORMATION
+    # --------------------------------------------------------
+
+    doc.add_heading(
+        "8. System Information",
+        level=1
+    )
+
+    doc.add_paragraph(
+        "HEXANOVA uses YOLOv8 for known-object detection and "
+        "OpenCV/NumPy-based image analysis for the prototype "
+        "anomaly review layer."
+    )
+
+    doc.add_paragraph(
+        "The currently validated trained class is Shipwreck "
+        "using the AI4Shipwrecks Side-Scan Sonar dataset."
+    )
+
+    # --------------------------------------------------------
+    # IMAGES
+    # --------------------------------------------------------
+
+    if original_image is not None:
+
+        doc.add_heading(
+            "9. Survey Image",
+            level=1
+        )
+
+        image_buffer = BytesIO()
+        original_image.save(
+            image_buffer,
+            format="PNG"
+        )
+        image_buffer.seek(0)
+
+        doc.add_picture(
+            image_buffer,
+            width=Inches(6.2)
+        )
+
+    if annotated_image is not None:
+
+        doc.add_heading(
+            "10. AI Detection Visualization",
+            level=1
+        )
+
+        annotated_buffer = BytesIO()
+
+        annotated_pil = Image.fromarray(
+            cv2.cvtColor(
+                annotated_image,
+                cv2.COLOR_BGR2RGB
+            )
+        )
+
+        annotated_pil.save(
+            annotated_buffer,
+            format="PNG"
+        )
+        annotated_buffer.seek(0)
+
+        doc.add_picture(
+            annotated_buffer,
+            width=Inches(6.2)
+        )
+
+        doc.add_paragraph(
+            "This image shows the regions identified by the "
+            "YOLOv8 known-object detection model."
+        )
+
+    if anomaly_image is not None:
+
+        doc.add_heading(
+            "11. Anomaly Analysis Visualization",
+            level=1
+        )
+
+        anomaly_buffer = BytesIO()
+
+        # anomaly_image is already RGB because it is generated
+        # from the RGB processed sonar image.
+        anomaly_pil = Image.fromarray(
+            anomaly_image
+        )
+
+        anomaly_pil.save(
+            anomaly_buffer,
+            format="PNG"
+        )
+        anomaly_buffer.seek(0)
+
+        doc.add_picture(
+            anomaly_buffer,
+            width=Inches(6.2)
+        )
+
+        doc.add_paragraph(
+            "Yellow boxes indicate localized sonar regions "
+            "flagged by the prototype anomaly-analysis layer. "
+            "These are potential anomalies for human inspection "
+            "and are not confirmed marine debris."
+        )
+
+    doc.add_paragraph()
+
+    footer_note = doc.add_paragraph()
+    footer_note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    footer_note.add_run(
+        "Generated by HEXANOVA — AI-assisted sonar screening prototype"
+    ).italic = True
+
+    output = BytesIO()
+
+    doc.save(output)
+
+    output.seek(0)
+
+    return output.getvalue()
 
 
 # ============================================================
@@ -878,9 +1411,9 @@ elif (
         st.caption(
             "Validation basis: the value is the YOLO "
             "model's detection confidence. In this "
-            "prototype, 30% is used as the confirmation "
-            "threshold; below that, the result is treated "
-            "as low confidence."
+            f"prototype, {CONFIDENCE_THRESHOLD:.0%} is used "
+            "as the confirmation threshold; below that, "
+            "the result is treated as low confidence."
         )
 
 
@@ -1046,55 +1579,19 @@ elif (
                 "🟨 Suspicious Sonar Regions"
             )
 
-            anomaly_visual = (
-                processed_image.copy()
+            anomaly_visual = data.get(
+                "anomaly_visual"
             )
 
-
-            for index, region in enumerate(
-                regions
-            ):
-
-                x = region["x"]
-
-                y = region["y"]
-
-                w = region["width"]
-
-                h = region["height"]
-
-
-                cv2.rectangle(
+            if anomaly_visual is not None:
+                st.image(
                     anomaly_visual,
-                    (x, y),
-                    (x + w, y + h),
-                    (255, 255, 0),
-                    3
-                )
-
-
-                cv2.putText(
-                    anomaly_visual,
-                    f"Potential Region {index + 1}",
-                    (
-                        x,
-                        max(
-                            20,
-                            y - 8
-                        )
+                    caption=(
+                        "Potential Anomaly Regions — "
+                        "Yellow boxes require human inspection"
                     ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 0),
-                    2
+                    use_container_width=True
                 )
-
-
-            st.image(
-                anomaly_visual,
-                caption="Potential Anomaly Regions",
-                use_container_width=True
-            )
 
         else:
 
@@ -1237,6 +1734,10 @@ elif st.session_state.page == "Reports":
             "anomaly"
         ]
 
+        anomaly_visual = data.get(
+            "anomaly_visual"
+        )
+
         # ----------------------------------------------------
         # REPORT HEADER
         # ----------------------------------------------------
@@ -1284,6 +1785,44 @@ elif st.session_state.page == "Reports":
             caption="Annotated AI Detection Result",
             use_container_width=True
         )
+
+
+        # ----------------------------------------------------
+        # ANOMALY ANALYSIS IMAGE
+        # ----------------------------------------------------
+
+        st.subheader(
+            "⚠️ Anomaly Analysis Image"
+        )
+
+        if anomaly_visual is not None and suspicious_regions if False else False:
+            pass
+
+        suspicious_regions_for_display = anomaly.get(
+            "anomaly_regions",
+            []
+        )
+
+        if suspicious_regions_for_display:
+            st.image(
+                anomaly_visual,
+                caption=(
+                    "Potential Anomaly Regions — "
+                    "Yellow boxes indicate suspicious sonar regions"
+                ),
+                use_container_width=True
+            )
+
+            st.caption(
+                "The highlighted regions are potential anomalies "
+                "identified by the prototype anomaly-analysis layer. "
+                "They are not confirmed marine debris."
+            )
+        else:
+            st.info(
+                "No suspicious sonar regions were identified, "
+                "so no anomaly-region overlay is shown."
+            )
 
 
         st.divider()
@@ -1478,6 +2017,14 @@ elif st.session_state.page == "Reports":
             explanation
         )
 
+        if suspicious_regions:
+            st.info(
+                "⚠️ The anomaly overlay highlights the suspicious "
+                "regions identified by the prototype. These regions "
+                "are flagged for human inspection and are not "
+                "automatically classified as marine debris."
+            )
+
         st.caption(
             "It shows how strongly the image contains "
             "unusual localized sonar patterns that may "
@@ -1600,7 +2147,18 @@ elif st.session_state.page == "Reports":
             },
 
             "suspicious_regions":
-                suspicious_regions
+                suspicious_regions,
+
+            "visualizations": {
+                "ai_detection_image":
+                    "Included in the human-readable Word report and Reports page.",
+                "anomaly_analysis_image":
+                    (
+                        "Included when suspicious anomaly regions are present. "
+                        "Highlighted regions are potential anomalies and require "
+                        "human inspection."
+                    )
+            }
         }
 
 
@@ -1616,24 +2174,46 @@ elif st.session_state.page == "Reports":
         )
 
         st.caption(
-            "The downloaded JSON contains the structured "
-            "survey information shown in this report."
+            "Download either the structured JSON report or "
+            "the human-readable Word survey statement."
         )
-
 
         report_json = json.dumps(
             report,
             indent=4
         )
 
-
         st.download_button(
-            label="⬇️ Download HEXANOVA Survey Report",
+            label="⬇️ Download Structured JSON Report",
             data=report_json,
             file_name=(
                 "hexanova_sonar_survey_report.json"
             ),
             mime="application/json",
+            use_container_width=True
+        )
+
+        annotated_image_for_report = results[
+            0
+        ].plot()
+
+        word_report = create_word_report(
+            report,
+            original_image=image,
+            annotated_image=annotated_image_for_report,
+            anomaly_image=anomaly_visual
+        )
+
+        st.download_button(
+            label="📄 Download Human-Readable Word Report",
+            data=word_report,
+            file_name=(
+                "hexanova_sonar_survey_report.docx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-"
+                "officedocument.wordprocessingml.document"
+            ),
             use_container_width=True
         )
 
