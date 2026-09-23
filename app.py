@@ -3,6 +3,9 @@ from PIL import Image
 import numpy as np
 import cv2
 import json
+import csv
+from io import StringIO
+import pandas as pd
 from datetime import datetime
 from ultralytics import YOLO
 from anomaly import analyse_anomaly
@@ -51,6 +54,9 @@ if "analysis_data" not in st.session_state:
 if "report" not in st.session_state:
     st.session_state.report = None
 
+if "geo_metadata" not in st.session_state:
+    st.session_state.geo_metadata = None
+
 
 # ============================================================
 # LOAD MODEL
@@ -73,6 +79,7 @@ PAGES = [
     "Upload & Analyse",
     "AI Detection + Anomaly Analysis",
     "Reports",
+    "Detection Map",
     "About System"
 ]
 
@@ -89,8 +96,81 @@ def go_to(page_name):
 # ============================================================
 # ANALYSIS FUNCTION
 # ============================================================
+# ============================================================
+# AURORA / SONAR METADATA HELPERS
+# ============================================================
 
-def run_analysis(uploaded_file):
+def read_sonar_metadata(uploaded_csv):
+    """Read a sonar/AUV metadata CSV without inventing coordinates."""
+    if uploaded_csv is None:
+        return []
+
+    raw = uploaded_csv.getvalue()
+    text = raw.decode("utf-8-sig", errors="replace")
+
+    try:
+        dialect = csv.Sniffer().sniff(text[:5000])
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.DictReader(StringIO(text), dialect=dialect)
+    rows = []
+
+    for row in reader:
+        cleaned = {
+            str(k).strip(): (str(v).strip() if v is not None else "")
+            for k, v in row.items()
+            if k is not None
+        }
+        if cleaned:
+            rows.append(cleaned)
+
+    return rows
+
+
+def build_geo_record(row):
+    """Convert one metadata row into report-ready geographic information."""
+    if not row:
+        return {
+            "status": "Coordinates unavailable",
+            "source": "No metadata row selected.",
+            "latitude": None,
+            "longitude": None
+        }
+
+    lat_text = row.get("Latitude", "")
+    lon_text = row.get("Longitude", "")
+
+    try:
+        latitude = float(lat_text)
+        longitude = float(lon_text)
+    except (TypeError, ValueError):
+        return {
+            "status": "Coordinates unavailable",
+            "source": "Selected metadata row does not contain valid Latitude/Longitude values.",
+            "latitude": None,
+            "longitude": None,
+            "metadata_row": row
+        }
+
+    return {
+        "status": "Geotagged ping",
+        "source": "Uploaded sonar/AUV metadata CSV",
+        "latitude": latitude,
+        "longitude": longitude,
+        "date": row.get("Data", ""),
+        "time": row.get("Time", ""),
+        "ping_number": row.get("Ping Number", ""),
+        "file": row.get("File", ""),
+        "heading": row.get("Heading", ""),
+        "roll": row.get("Roll", ""),
+        "pitch": row.get("Pitch", ""),
+        "sound_velocity": row.get("SoundVelocity", "")
+    }
+
+
+
+def run_analysis(uploaded_file, geo_metadata=None):
 
     image = Image.open(
         uploaded_file
@@ -239,6 +319,13 @@ def run_analysis(uploaded_file):
                 "%Y-%m-%d %H:%M:%S"
             ),
 
+        "geographic_information": geo_metadata or {
+            "status": "Coordinates unavailable",
+            "source": "No matching sonar/AUV metadata supplied.",
+            "latitude": None,
+            "longitude": None
+        },
+
     }
 
 
@@ -383,6 +470,12 @@ def create_word_report(
         (
             "Confirmation Threshold",
             f'{report_data["confidence_threshold"]:.0%}'
+        ),
+        (
+            "Geographic Status",
+            report_data.get("geographic_information", {}).get(
+                "status", "Coordinates unavailable"
+            )
         )
     ]
 
@@ -556,11 +649,36 @@ def create_word_report(
         level=1
     )
 
-    doc.add_paragraph(
-        "No geographic coordinates were inferred from the "
-        "sonar image. Latitude and longitude should be obtained "
-        "from sonar/AUV metadata or ping headers when available."
-    )
+    geo = report_data.get("geographic_information", {})
+
+    if geo.get("latitude") is not None and geo.get("longitude") is not None:
+        doc.add_paragraph(
+            f"Latitude: {geo['latitude']:.6f}"
+        )
+        doc.add_paragraph(
+            f"Longitude: {geo['longitude']:.6f}"
+        )
+        doc.add_paragraph(
+            f"Metadata source: {geo.get('source', 'Sonar/AUV metadata')}"
+        )
+        if geo.get("ping_number"):
+            doc.add_paragraph(
+                f"Ping Number: {geo['ping_number']}"
+            )
+        if geo.get("file"):
+            doc.add_paragraph(
+                f"Sonar File: {geo['file']}"
+            )
+        doc.add_paragraph(
+            "These coordinates identify the selected sonar/AUV ping position. "
+            "They should not be interpreted as exact object-centre coordinates "
+            "without additional sonar geometry and georeferencing."
+        )
+    else:
+        doc.add_paragraph(
+            "Coordinates unavailable. Latitude and longitude were not supplied "
+            "from matching sonar/AUV metadata for this analysis."
+        )
 
     # --------------------------------------------------------
     # FINAL SURVEY INTERPRETATION
@@ -1122,6 +1240,56 @@ elif st.session_state.page == "Upload & Analyse":
 
 
         # ----------------------------------------------------
+        # OPTIONAL SONAR/AUV GEOTAG METADATA
+        # ----------------------------------------------------
+
+        st.subheader("📍 Sonar/AUV Geotag Metadata")
+        st.caption(
+            "For real coordinates, upload the metadata CSV from the same sonar survey. "
+            "Do not use coordinates from a different survey for this image."
+        )
+
+        metadata_file = st.file_uploader(
+            "Upload matching sonar/AUV metadata CSV (optional)",
+            type=["csv"],
+            key="sonar_metadata_csv"
+        )
+
+        selected_geo = None
+
+        if metadata_file is not None:
+            metadata_rows = read_sonar_metadata(metadata_file)
+
+            if metadata_rows:
+                labels = []
+                for idx, row in enumerate(metadata_rows):
+                    ping = row.get("Ping Number", "") or "N/A"
+                    file_name = row.get("File", "") or "N/A"
+                    lat = row.get("Latitude", "") or "N/A"
+                    lon = row.get("Longitude", "") or "N/A"
+                    labels.append(
+                        f"Row {idx + 1} | Ping {ping} | {file_name} | {lat}, {lon}"
+                    )
+
+                selected_label = st.selectbox(
+                    "Select the metadata row corresponding to this sonar image/ping",
+                    labels,
+                    key="selected_geo_row"
+                )
+                selected_index = labels.index(selected_label)
+                selected_geo = build_geo_record(metadata_rows[selected_index])
+
+                if selected_geo.get("latitude") is not None:
+                    st.success(
+                        f"📍 Geotag ready: {selected_geo['latitude']:.6f}, "
+                        f"{selected_geo['longitude']:.6f}"
+                    )
+                else:
+                    st.warning(selected_geo.get("source", "Coordinates unavailable."))
+            else:
+                st.warning("The CSV could not be read as a metadata table.")
+
+        # ----------------------------------------------------
         # ANALYSE BUTTON
         # ----------------------------------------------------
 
@@ -1136,7 +1304,8 @@ elif st.session_state.page == "Upload & Analyse":
             ):
 
                 analysis = run_analysis(
-                    uploaded_file
+                    uploaded_file,
+                    geo_metadata=selected_geo
                 )
 
                 st.session_state.analysis_data = (
@@ -1829,6 +1998,33 @@ elif st.session_state.page == "Reports":
 
 
         # ----------------------------------------------------
+        # GEOGRAPHIC INFORMATION
+        # ----------------------------------------------------
+
+        st.subheader("📍 Geographic Information")
+        geo = data.get("geographic_information", {})
+
+        if geo.get("latitude") is not None and geo.get("longitude") is not None:
+            g1, g2, g3 = st.columns(3)
+            with g1:
+                st.metric("Latitude", f"{geo['latitude']:.6f}")
+            with g2:
+                st.metric("Longitude", f"{geo['longitude']:.6f}")
+            with g3:
+                st.metric("Ping", str(geo.get("ping_number", "N/A")))
+
+            st.caption(
+                "These coordinates represent the selected sonar/AUV ping position. "
+                "Exact object-centre coordinates require additional sonar georeferencing."
+            )
+        else:
+            st.info(
+                "Coordinates unavailable. Upload matching sonar/AUV metadata to add a real ping geotag."
+            )
+
+        st.divider()
+
+        # ----------------------------------------------------
         # SURVEY SUMMARY
         # ----------------------------------------------------
 
@@ -2126,6 +2322,13 @@ elif st.session_state.page == "Reports":
             "confidence_threshold":
                 CONFIDENCE_THRESHOLD,
 
+            "geographic_information":
+                data.get("geographic_information", {
+                    "status": "Coordinates unavailable",
+                    "latitude": None,
+                    "longitude": None
+                }),
+
             "anomaly_analysis": {
 
                 "status":
@@ -2185,6 +2388,7 @@ elif st.session_state.page == "Reports":
 
         st.download_button(
             label="⬇️ Download Structured JSON Report",
+            key="download_json_report",
             data=report_json,
             file_name=(
                 "hexanova_sonar_survey_report.json"
@@ -2206,6 +2410,7 @@ elif st.session_state.page == "Reports":
 
         st.download_button(
             label="📄 Download Human-Readable Word Report",
+            key="download_word_report",
             data=word_report,
             file_name=(
                 "hexanova_sonar_survey_report.docx"
@@ -2246,6 +2451,52 @@ elif st.session_state.page == "Reports":
 
             go_to(
                 "About System"
+            )
+
+
+# ============================================================
+# DETECTION MAP
+# ============================================================
+
+elif st.session_state.page == "Detection Map":
+
+    st.header("Detection Map")
+
+    st.write(
+        "Map view of the selected sonar/AUV ping location. "
+        "Coordinates are shown only when supplied by matching metadata."
+    )
+
+    if not st.session_state.analysis_done:
+        st.warning("Run a sonar analysis first.")
+    else:
+        data = st.session_state.analysis_data
+        geo = data.get("geographic_information", {})
+
+        if geo.get("latitude") is not None and geo.get("longitude") is not None:
+            map_df = pd.DataFrame([{
+                "latitude": geo["latitude"],
+                "longitude": geo["longitude"]
+            }])
+
+            st.map(map_df, latitude="latitude", longitude="longitude", zoom=12)
+
+            st.success(
+                f"📍 Ping location: {geo['latitude']:.6f}, {geo['longitude']:.6f}"
+            )
+
+            st.write(
+                f"**Source:** {geo.get('source', 'Sonar/AUV metadata')}"
+            )
+            if geo.get("ping_number"):
+                st.write(f"**Ping Number:** {geo['ping_number']}")
+            if geo.get("file"):
+                st.write(f"**Sonar File:** {geo['file']}")
+
+        else:
+            st.info(
+                "No coordinates are available for this analysis. "
+                "Upload a matching sonar/AUV metadata CSV on the Upload & Analyse page."
             )
 
 
@@ -2296,6 +2547,8 @@ elif st.session_state.page == "About System":
         "AI Detection"
         "  →  "
         "Anomaly Analysis"
+        "  →  "
+        "Geotagging"
         "  →  "
         "Survey Report"
     )
