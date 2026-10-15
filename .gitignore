@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+
+# Temporary training files
+runs/
+*.cache
+
+# Keep trained models tracked
+!best.pt
+# Large local datasets
+drishti_3class_dataset/
+drishti_dataset/
+
+# Training outputs and cache files
+runs/
+*.cache
